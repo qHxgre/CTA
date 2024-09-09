@@ -88,7 +88,7 @@ class HFB_v001(CtaTemplate):
         else:
             with open(self.jFilePath, 'r') as jfile:
                 self.gridline_records = json.load(jfile)
-        self.gridline_records = {int(float(key)): value for key, value in self.gridline_records.items()}
+        self.gridline_records = {int(float(key)): {"order_id": [-1], "open_qty": value["open_qty"], "close_qty": value["close_qty"]} for key, value in self.gridline_records.items()}
         self.write_log(f"\n【盘前处理】合约: {self.vtSymbol}\n 读取隔夜数据: \n{self.gridline_records}")
 
         # 如果没有隔夜数据，则当前网格设置为基础价格，且默认做多
@@ -232,6 +232,7 @@ class HFB_v001(CtaTemplate):
 
     def check_before_send(self, gridline: int, offset: int) -> bool:
         """发委托前检查"""
+
         if (offset==OFFSET_OPEN) & (gridline in self.gridline_records):
             # 避免重复发开仓单
             # self.write_log(f"【拒绝发单】该网格线 {gridline} 已开仓：{self.gridline_records[gridline]}")
@@ -239,6 +240,8 @@ class HFB_v001(CtaTemplate):
         if offset==OFFSET_CLOSE:
             # 避免重复发平仓单：遍历gridline的order_id，如果有个平仓挂单则不允许发平仓单
             for order_id in self.gridline_records[gridline]["order_id"]:
+                if order_id < 0:        # 如果是隔夜订单，则跳过不检查
+                    continue
                 self.write_log(f"test {order_id}: {self.orders_status[order_id]}")
                 if (self.orders_status[order_id][1] == OFFSET_CLOSE) and (self.orders_status[order_id][2] in ["未知", "未成交", "部分成交", "部分撤单还在队列"]):
                     self.write_log(f"【拒绝发单】该网格线 {gridline} 已有平仓挂单 {order_id}：{self.gridline_records[gridline]}, {self.orders_status[order_id]}")
@@ -308,7 +311,6 @@ class HFB_v001(CtaTemplate):
         else:
             self.last_grid = (self.current_grid - self.grid_interval) if direction==DIRECTION_SHORT else (self.current_grid + self.grid_interval)
         self.write_log(f"\n【更新参数】上个网格: {self.last_grid}，当前网格: {self.current_grid}, 下个网格: {self.next_grid}")
-
 
     def cancel_before_send(self) -> int:
         """发送委托单前都要撤销已挂订单，只撤销相反的单子，即开仓单撤销平仓单，平仓单撤销开场单"""
