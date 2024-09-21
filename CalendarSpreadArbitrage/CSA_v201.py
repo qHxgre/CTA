@@ -22,7 +22,7 @@ STATUS_REJECTED = 5
 STATUS_UNKNOWN = -1
 
 """策略思想
-* 单品种
+* 多品种
 * 价差 = 远月合约 - 近月合约
 * 处理缺腿
 """

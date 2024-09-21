@@ -143,6 +143,7 @@ class future_grid_inf_v106(CtaTemplate):
         # 更新时间，推送状态
         self.putEvent()
 
+
         # 非交易时间直接返回
         if not self.timer.check_time(tick.time, 'trade_time'):
             self.write_log(f'{tick.time} is not in trading time')
@@ -155,6 +156,9 @@ class future_grid_inf_v106(CtaTemplate):
         
         # 尾盘程序
         self.process_end(tick.time)
+
+        if tick.askPrice1 > 6250:
+            return
 
         # 增加底仓
         # self.add_base_grids(tick.askPrice1, tick.bidPrice1)
