@@ -26,7 +26,7 @@ STATUS_UNKNOWN = -1
 
 
 class GT_v001(CtaTemplate):
-    """高频刷单策略：网格、单品种"""
+    """单品种期货网格交易"""
     className = 'GT_v001'
     author = 'hxgre'
     name = 'BigHFB'                # 策略实例名称
@@ -127,7 +127,7 @@ class GT_v001(CtaTemplate):
         self.write_log("\n【委托回报】{} | 时间: {} | 委托编号: {} | 方向: {} | 开平: {} | 状态: {} | 价格: {} | 下单数量: {} | 成交数量: {}".format(
             order.symbol, order.orderTime, order.orderID, order.direction, order.offset, order.status, order.price, order.totalVolume, order.tradedVolume
         ))
-        self.orders_info[order.OrderID] = {
+        self.orders_info[order.orderID] = {
             "direction": DIRECTION_SHORT if order.direction=='空' else DIRECTION_LONG,
             "offset": OFFSET_OPEN if order.offset=='开仓' else OFFSET_CLOSE,
             "status": order.status, "price": order.price,
@@ -137,12 +137,12 @@ class GT_v001(CtaTemplate):
         # 根据委托汇报信息更新记录
         if order.offset == "开仓":
             gridline = self.find_gridline(price=order.price)
-            self.update_records(gridline=gridline, order_id=order.orderID, open_qty=order.tradedVolume, close_qty=None)
+            self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=order.tradedVolume, close_qty=None)
             if order.tradedVolume != 0:     # 开仓时，只要当这个网格线有一手成交，就可以以这个开仓价格作为当前网格线更新参数
                 self.update_params(DIRECTION_SHORT if order.direction == "卖" else DIRECTION_LONG, order.price)
         elif order.offset in ["平今", "平仓", "平昨"]:
             gridline = self.find_gridline(order_id=order.orderID)
-            self.update_records(gridline=gridline, order_id=order.orderID, open_qty=None, close_qty=order.tradedVolume)
+            self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=None, close_qty=order.tradedVolume)
             if gridline not in self.gridline_records:     # 平仓时，只有当这个网格线平完后被删 除了，才能以这个平仓价格作为当前网格线更新参数
                 self.update_params(DIRECTION_SHORT if order.direction == "卖" else DIRECTION_LONG, order.price)
 
@@ -158,8 +158,11 @@ class GT_v001(CtaTemplate):
     def onTrade(self, trade, log=False):
         """成交回报"""
         self.write_log("\n【成交回报】{} | 时间: {} | 成交编号: {} | 委托编号: {} | 方向: {} | 开平: {} | 价格: {} | 数量: {}".format(
-            trade.symbol, trade.tradeTime, trade.orderID, trade.orderID, trade.direction, trade.offset, trade.price, trade.volume
+            trade.symbol, trade.tradeTime, trade.tradeID, trade.orderID, trade.direction, trade.offset, trade.price, trade.volume
         ))
+        #由于委托回报和成交之间还是有差异，所以我们在成交回报中确认 是否删除
+        self.delete_gridline_records(self.find_gridline(order_id=trade.orderID))
+
 
     def write_log(self, msg: str, std: int=1):
         """打印日志"""
@@ -171,9 +174,8 @@ class GT_v001(CtaTemplate):
 
     def initialize_before_trading(self) -> None:
         """盘前初始化"""
-
         # 读取隔夜JSON文件
-        self.jFilePath = 'C:\\Users\\Administrator\\AppData\\Roaming\\InfiniTrader_Simulation\\pyStrategy\\files\\HFBdata.json'
+        self.jFilePath = 'C:\\Users\\Administrator\\AppData\\Roaming\\InfiniTrader_Simulation\\pyStrategy\\files\\DataGT.json'
         if not os.path.exists(self.jFilePath):
             with open(self.jFilePath, 'w') as jfile:
                 json.dump(self.gridline_records, jfile, indent=4)
@@ -231,7 +233,7 @@ class GT_v001(CtaTemplate):
 
         if self.check_before_send(gridline, offset) is False:
             return
-        self.cancel_before_send()       # 发单前先撤单
+        self.cancel_before_send(offset)       # 发单前先撤单
         order_id = self.sendOrder(
             orderType=orderType, price=price, volume=volume, symbol=self.vtSymbol, exchange=self.exchange
         )
@@ -279,7 +281,7 @@ class GT_v001(CtaTemplate):
         elif close_qty is not None:     # 更新平仓单数据
             self.gridline_records[gridline]["close_qty"] = close_qty
 
-        self.write_log(f"\n【更新信息】{self.gridline_records}")
+        self.write_log(f"\n【更新 gridline】{self.gridline_records}")
         self.save_records(self.jFilePath)
 
     def delete_gridline_records(self, gridline: int):
@@ -287,7 +289,7 @@ class GT_v001(CtaTemplate):
         1. 在 gridline_records 中，open_qty == close_qty
         2. 在 orders_info 中，相关订单处于完成或撤单状态
         """
-        condition_1 = self.gridline_records[gridline]["openn_qty"] == self.gridline_records[gridline]["close_qty"]
+        condition_1 = self.gridline_records[gridline]["open_qty"] == self.gridline_records[gridline]["close_qty"]
         condition_2 = True
         for order_id in self.gridline_records[gridline]["order_id"]:
             if not self.orders_info[order_id]["status"] in ["全部成交", "已撤销"]:
@@ -298,7 +300,6 @@ class GT_v001(CtaTemplate):
             self.write_log(f"【平仓完成】删除该开仓网格 {gridline}, 相关信息未: {self.gridline_records[gridline]}")
             del self.gridline_records[gridline]
 
-
     def find_gridline(self, price: Optional[int]=None, order_id: Optional[int]=None) -> int:
         """确定网格线
         # 开仓单的网格线：
@@ -308,10 +309,10 @@ class GT_v001(CtaTemplate):
             # 如果有 order_id，则根据 order_id 在 gridline_records 中寻找对应的开仓网格线
             # 如果没有 order_id，则根据传入价格 price 确定
         """
+        if (price is None) and (order_id is None):
+            raise ValueError(f"定位网格线时需要传入 price - {price} 或者 order_id - {order_id}")
         if price is not None:
             return price
-        if order_id is None:
-            raise ValueError(f"定位网格线时需要传入 price - {price} 或者 order_id - {order_id}")
         for gridline, gridinfo in self.gridline_records.items():
             if order_id in gridinfo["order_id"]:
                 return gridline
@@ -319,7 +320,8 @@ class GT_v001(CtaTemplate):
 
     def update_params(self, direction: int, price: int) -> None:
         """更新参数，只能当委托有成交才更新
-        self.last_grid 是平仓价格的判断标准，如果 self.last_grid 和 self.current_grid 相差了太大间距，可以后期设置哥定时器去补上这些差的网格"""
+        self.last_grid 是平仓价格的判断标准，如果 self.last_grid 和 self.current_grid 相差了太大间距，可以后期设置哥定时器去补上这些差的网格
+        """
         # 更新参数
         self.current_grid = price
         self.next_grid = (price + self.grid_interval) if direction==DIRECTION_SHORT else (price - self.grid_interval)
@@ -355,7 +357,6 @@ class GT_v001(CtaTemplate):
         with open(filepath, 'w') as jfile:
             json.dump(records, jfile, indent=4)
 
-
     def time_check(self, curtime: str, period: str) -> bool:
         """检查当前时间是否在特定的时间段内"""
         self.timer = {
@@ -371,7 +372,7 @@ class GT_v001(CtaTemplate):
         }
 
         try:
-            curtime = datetime.strptime(curtime, "%Y%m%d %H:%M:%S").strftime("%H:%M:%S")
+            curtime = datetime.strptime(curtime, "%H:%M:%S.%f").strftime("%H:%M:%S")
             temp_time = datetime.strptime(curtime, "%H:%M:%S.%f").time()
             curtime = datetime_time(temp_time.hour, temp_time.minute, temp_time.second)
         except ValueError:
@@ -385,7 +386,10 @@ class GT_v001(CtaTemplate):
             for _, (s, e) in time_period.items():
                 start = datetime.strptime(s, "%H:%M:%S").time()
                 end = datetime.strptime(e, "%H:%M:%S").time()
-                return True if start <= curtime <= end else False
+                # self.write_log(f"{start} - {curtime} - {end}")
+                if start <= curtime <= end:
+                    return True
+            return False
         # 其他时间检查
         elif isinstance(time_period, list):
             start = datetime.strptime(time_period[0], "%H:%M:%S").time()
