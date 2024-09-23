@@ -46,9 +46,12 @@ class GT_v001(CtaTemplate):
 
         # 变量映射表: 可实时监控变量
         self.varMap = {
-            'last_grid': '上个网格',
-            'current_grid': '当前网格',
-            'next_grid': '下个网格',
+            'short_last_grid': '【做空】上个网格',
+            'short_curr_grid': '【做空】当前网格',
+            'short_next_grid': '【做空】下个网格',
+            'long_last_grid': '【做多】上个网格',
+            'long_curr_grid': '【做多】当前网格',
+            'long_next_grid': '【做多】下个网格',
         }
 
         self.exchange = ''
@@ -58,7 +61,8 @@ class GT_v001(CtaTemplate):
         self.grid_interval = 4      # 网格间距1个点
         self.base_grid = 0      # 基准网格线
         self.trigger_shift = 0      # 发单偏移量
-        self.current_grid, self.next_grid, self.last_grid = 0, 0, 0
+        self.short_curr_grid, self.short_next_grid, self.short_last_grid = None, None, None
+        self.long_curr_grid, self.long_next_grid, self.long_last_grid = None, None, None
 
         """gridline_records
         记录每个网格线的情况，示例如下：
@@ -94,7 +98,6 @@ class GT_v001(CtaTemplate):
         super().onStart()
         self.initialize_before_trading()
 
-
     def onTick(self, tick):
         super().onTick(tick)
         self.putEvent()     # 更新时间，推送状态
@@ -103,20 +106,32 @@ class GT_v001(CtaTemplate):
             self.write_log(f'{tick.time} 为非交易时间！')
             return
 
+        # 确定网格参数
+        if self.need_initialize_grids(direction):
+            if tick.askPrice1 > self.base_grid:
+                direction = DIRECTION_SHORT
+            elif tick.bidPrice1 < self.base_grid:
+                direction = DIRECTION_LONG
+            else:
+                self.write_log(f"无法确定交易方向，暂不交易。base_grid: {self.base_grid}, 卖一价: {tick.ask_price1}, 买一价: {tick.bid_price1}")
+                return
+            self.update_grid_params(direction, self.base_grid)
+            return
+
         if tick.askPrice1 > self.base_grid:         # 做空方向
             book_price = tick.askPrice1     # 盘口价格
-            if book_price >= self.next_grid - self.trigger_shift:        # 开仓
-                self.send_order(DIRECTION_SHORT, OFFSET_OPEN, self.next_grid, self.order_volume)
-            if book_price <= self.last_grid + self.trigger_shift:       # 平仓
-                order_volume = self.gridline_records[self.last_grid]["open_qty"] - self.gridline_records[self.last_grid]["close_qty"]
-                self.send_order(DIRECTION_SHORT, OFFSET_CLOSE, self.last_grid, order_volume)
+            if book_price >= self.short_next_grid - self.trigger_shift:        # 开仓
+                self.send_order(DIRECTION_SHORT, OFFSET_OPEN, self.short_next_grid, self.order_volume)
+            if (self.short_last_grid is not None) and (book_price <= self.short_last_grid + self.trigger_shift):       # 平仓
+                order_volume = self.gridline_records[self.short_last_grid]["open_qty"] - self.gridline_records[self.short_last_grid]["close_qty"]
+                self.send_order(DIRECTION_LONG, OFFSET_CLOSE, self.short_last_grid, order_volume)
         elif tick.bidPrice1 < self.base_grid:       # 做多方向
             book_price = tick.bidPrice1           # 盘口价格
-            if book_price <= self.next_grid + self.trigger_shift:       # 开仓
-                self.send_order(DIRECTION_LONG, OFFSET_OPEN, self.next_grid, self.order_volume)
-            if book_price >= self.last_grid - self.trigger_shift:       # 平仓
-                order_volume = self.gridline_records[self.last_grid]["open_qty"] - self.gridline_records[self.last_grid]["close_qty"]
-                self.send_order(DIRECTION_SHORT, OFFSET_CLOSE, self.last_grid, order_volume)
+            if book_price <= self.long_next_grid + self.trigger_shift:       # 开仓
+                self.send_order(DIRECTION_LONG, OFFSET_OPEN, self.long_next_grid, self.order_volume)
+            if (self.long_last_grid is not None) and (book_price >= self.long_last_grid - self.trigger_shift):       # 平仓
+                order_volume = self.gridline_records[self.long_last_grid]["open_qty"] - self.gridline_records[self.long_last_grid]["close_qty"]
+                self.send_order(DIRECTION_SHORT, OFFSET_CLOSE, self.long_last_grid, order_volume)
         else:
             return      # 当前价格不在可开仓范围内，不交易
 
@@ -139,7 +154,7 @@ class GT_v001(CtaTemplate):
             gridline = self.find_gridline(price=order.price)
             self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=order.tradedVolume, close_qty=None)
             if order.tradedVolume != 0:     # 开仓时，只要当这个网格线有一手成交，就可以以这个开仓价格作为当前网格线更新参数
-                self.update_params(DIRECTION_SHORT if order.direction == "卖" else DIRECTION_LONG, order.price)
+                self.update_grid_params(DIRECTION_SHORT if order.direction == "卖" else DIRECTION_LONG, order.price)
         elif order.offset in ["平今", "平仓", "平昨"]:
             gridline = self.find_gridline(order_id=order.orderID)
             self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=None, close_qty=order.tradedVolume)
@@ -161,16 +176,20 @@ class GT_v001(CtaTemplate):
         #由于委托回报和成交之间还是有差异，所以在成交回报中确认 是否删除
         self.delete_gridline_records(self.find_gridline(order_id=trade.orderID))
         # 平仓时，只有当这个网格线平完后被删除了，即执行了delete_gridline_records操作后，才能以这个平仓价格作为当前网格线更新参数
-        self.update_params(self.orders_info["direction"], self.last_grid)
-
+        if trade.offset in ["平今", "平仓", "平昨"]:
+            self.update_grid_params(
+                direction=DIRECTION_LONG if trade.direction == "卖" else DIRECTION_SHORT,
+                price=self.short_last_grid if self.short_last_grid is not None else self.long_last_grid
+            )
 
     def write_log(self, msg: str, std: int=1):
         """打印日志"""
         if std != 0:
             self.output(msg)
 
-    def print_grids(self, current_grid: int, last_grid: int, next_grid: int) -> str:
-        return "上个网格: {}，当前网格: {}, 下个网格: {}".format(last_grid, current_grid, next_grid)
+    def print_grids(self) -> str:
+        return "【做空】上个网格: {},【做空】当前网格: {},【做空】下个网格: {},【做多】上个网格: {},【做多】当前网格: {},【做多】下个网格: {}".format(
+            self.short_last_grid, self.short_curr_grid, self.short_next_grid, self.long_last_grid, self.long_curr_grid, self.long_next_grid)
 
     def initialize_before_trading(self) -> None:
         """盘前初始化"""
@@ -183,27 +202,33 @@ class GT_v001(CtaTemplate):
             with open(self.jFilePath, 'r') as jfile:
                 self.gridline_records = json.load(jfile)
         # 隔夜持仓的订单编号都是 -1
-        self.gridline_records = {int(float(key)): {"order_id": [-1], "open_qty": value["open_qty"], "close_qty": value["close_qty"]} for key, value in self.gridline_records.items()}
+        self.gridline_records = {int(float(k)): {"order_id": [-1], "open_qty": v["open_qty"], "close_qty": v["close_qty"]} for k, v in self.gridline_records.items()}
         self.write_log(f"\n【盘前处理】合约: {self.vtSymbol}\n 读取隔夜数据: \n{self.gridline_records}")
 
         # 如果没有隔夜数据，则当前网格设置为基础价格，且默认做多
         if not self.gridline_records:
-            self.current_grid = self.base_grid
-            self.next_grid = self.current_grid - self.grid_interval
-            self.last_grid = self.current_grid + self.grid_interval
-            self.write_log(f"\n【盘前处理】没有隔夜数据，则设置默认参数：{self.print_grids(self.current_grid, self.last_grid, self.next_grid)}")
+            self.write_log(f"\n【盘前处理】没有隔夜数据，待开盘确定方向后确认参数：{self.print_grids()}")
         else:
             sorted_gridlines = sorted(self.gridline_records.keys())
             min_grid, max_grid = min(self.gridline_records.keys()), max(self.gridline_records.keys())
             if max_grid < self.base_grid:       # 做多
-                self.current_grid = min_grid
-                self.next_grid = self.current_grid - self.grid_interval
-                self.last_grid = sorted_gridlines[1]
+                self.long_curr_grid = min_grid
+                self.long_next_grid = self.long_curr_grid - self.grid_interval
+                self.long_last_grid = sorted_gridlines[1]
             elif min_grid > self.base_grid:     # 做空
-                self.current_grid = max_grid
-                self.next_grid = self.current_grid + self.grid_interval
-                self.last_grid = sorted_gridlines[-2]
-            self.write_log(f"\n【盘前处理】隔夜数据，当前网格参数为：{self.print_grids(self.current_grid, self.last_grid, self.next_grid)}")
+                self.short_curr_grid = max_grid
+                self.short_next_grid = self.short_curr_grid + self.grid_interval
+                self.short_last_grid = sorted_gridlines[-2]
+            self.write_log(f"\n【盘前处理】隔夜数据，当前网格参数为：{self.print_grids()}")
+
+    def need_initialize_grids(self, direction: int) -> bool:
+        """检查是否需要初始化网格参数"""
+        if direction == DIRECTION_SHORT:
+            return True if (self.short_curr_grid is None) and (self.short_curr_grid is None) and (self.short_curr_grid is None) else False
+        elif direction == DIRECTION_LONG:
+            return True if (self.short_curr_grid is None) and (self.short_curr_grid is None) and (self.short_curr_grid is None) else False
+        else:
+            raise ValueError("【ERROR】错误的方向：", direction)
 
     def send_order(self, direction, offset, price, volume):
         """发单
@@ -221,20 +246,23 @@ class GT_v001(CtaTemplate):
         """
         if (direction == DIRECTION_SHORT) & (offset == OFFSET_OPEN):
             orderType = CTAORDER_SHORT              # 卖开
+            next_grid, curr_grid = self.short_next_grid, self.short_curr_grid
         elif (direction == DIRECTION_LONG) & (offset == OFFSET_OPEN):
             orderType = CTAORDER_BUY                # 买开
+            next_grid, curr_grid = self.long_next_grid, self.long_curr_grid
         elif (direction == DIRECTION_SHORT) & (offset == OFFSET_CLOSE):
             orderType = CTAORDER_SELL               # 卖平
+            next_grid, curr_grid = self.short_next_grid, self.short_curr_grid
         elif (direction == DIRECTION_LONG) & (offset == OFFSET_CLOSE):
             orderType = CTAORDER_COVER              # 买平
+            next_grid, curr_grid = self.long_next_grid, self.long_curr_grid
 
         self.write_log("\n【预发委托单】合约: {}, 买卖: {}, 开平: {}, 价格: {}, 数量: {}".format(
             self.vtSymbol, "做空" if direction == DIRECTION_SHORT else "做多",
             "开仓" if offset==OFFSET_OPEN else "平仓", price, volume
         ))
         # 确定网格线
-        gridline = self.find_gridline(price=self.next_grid if offset == OFFSET_OPEN else self.current_grid)
-
+        gridline = self.find_gridline(price=next_grid if offset == OFFSET_OPEN else curr_grid)
         if self.check_before_send(gridline, offset) is False:
             return
         self.cancel_before_send(offset)       # 发单前先撤单
@@ -248,10 +276,11 @@ class GT_v001(CtaTemplate):
 
         # 更新记录
         if offset == OFFSET_OPEN:
-            self.update_gridline_records(gridline=self.next_grid, order_id=order_id, open_qty=0, close_qty=None)
+            self.update_gridline_records(gridline=next_grid, order_id=order_id, open_qty=0, close_qty=None)
         elif offset == OFFSET_CLOSE:
-            self.update_gridline_records(gridline=self.current_grid, order_id=order_id, open_qty=None, close_qty=0)
+            self.update_gridline_records(gridline=curr_grid, order_id=order_id, open_qty=None, close_qty=0)
 
+        # 更新订单信息
         self.orders_info[order_id] = {"direction": direction, "offset": offset, "status": "未知", "order_volume": 0}
 
     def check_before_send(self, gridline: int, offset: int) -> bool:
@@ -327,19 +356,25 @@ class GT_v001(CtaTemplate):
                 return gridline
         raise ValueError(f"{order_id} 未找到平仓单信息: {self.gridline_records}")
 
-    def update_params(self, direction: int, price: int) -> None:
-        """更新参数，只能当委托有成交才更新
-        TODO：self.last_grid 是平仓价格的判断标准，如果 self.last_grid 和 self.current_grid 相差了太大间距，可以后期设置个定时器去补上这些差的网格
-        """
-        # 更新参数
-        self.current_grid = price
-        self.next_grid = (price + self.grid_interval) if direction==DIRECTION_SHORT else (price - self.grid_interval)
+    def update_grid_params(self, direction: int, price: int) -> None:
+        """更新网格参数"""
         sorted_gridlines = sorted(self.gridline_records.keys())
-        if len(sorted_gridlines) >= 2:
-            self.last_grid = sorted_gridlines[-2] if direction==DIRECTION_SHORT else sorted_gridlines[1]
-        else:       # 特殊情况：当存储的已开仓网格只有1个时，相当于平完了，则要开始换方向了
-            self.last_grid = 1 if direction==DIRECTION_SHORT else 9999
-        self.write_log(f"\n【更新参数】上个网格: {self.last_grid}，当前网格: {self.current_grid}, 下个网格: {self.next_grid}")
+        gridlines_nums = len(sorted_gridlines)
+        if direction == DIRECTION_SHORT:
+            self.short_curr_grid = price
+            self.short_next_grid = self.short_curr_grid + self.grid_interval
+            # 初始设置为 None, 当 gridlines 中只剩1个网格或没有网格时，则没有上一个平仓线
+            self.short_last_grid = None
+            if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2大的网格
+                self.short_last_grid = sorted_gridlines[-2]
+        elif direction == DIRECTION_LONG:
+            self.long_curr_grid = price
+            self.long_next_grid = self.long_curr_grid - self.grid_interval
+            # 初始设置为 None, 当 gridlines 中只剩1个网格或没有网格时，则没有上一个平仓线
+            self.long_last_grid = None
+            if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2小的网格
+                self.long_last_grid = sorted_gridlines[1]
+        self.write_log(f"\n【更新参数】{self.print_grids()}")
 
     def cancel_before_send(self, offset: int) -> int:
         """发送委托单前要撤销已挂订单，只撤销相反的单子，即开仓单撤销平仓单，平仓单撤销开场单"""
@@ -388,7 +423,6 @@ class GT_v001(CtaTemplate):
         except ValueError:
             temp_time = datetime.strptime(curtime, "%H:%M:%S").time()
             curtime = datetime_time(temp_time.hour, temp_time.minute, temp_time.second)
-
 
         time_period = self.timer[period]
         # 交易时间检查
