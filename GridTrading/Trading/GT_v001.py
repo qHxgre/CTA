@@ -143,8 +143,7 @@ class GT_v001(CtaTemplate):
         elif order.offset in ["平今", "平仓", "平昨"]:
             gridline = self.find_gridline(order_id=order.orderID)
             self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=None, close_qty=order.tradedVolume)
-            if gridline not in self.gridline_records:     # 平仓时，只有当这个网格线平完后被删 除了，才能以这个平仓价格作为当前网格线更新参数
-                self.update_params(DIRECTION_SHORT if order.direction == "卖" else DIRECTION_LONG, order.price)
+            # 平仓时，只有当这个网格线平完后被删除了，才能以这个平仓价格作为当前网格线更新参数，所以委托回报这里不更新参数，等到成交回报时再更新参数
 
         # 撤单时，如果该网格线的开仓数量为0，则直接删除该网格线
         if order.status == "已撤销":
@@ -154,14 +153,15 @@ class GT_v001(CtaTemplate):
                 del self.gridline_records[gridline]
                 self.save_records(self.jFilePath)
 
-
     def onTrade(self, trade, log=False):
         """成交回报"""
         self.write_log("\n【成交回报】{} | 时间: {} | 成交编号: {} | 委托编号: {} | 方向: {} | 开平: {} | 价格: {} | 数量: {}".format(
             trade.symbol, trade.tradeTime, trade.tradeID, trade.orderID, trade.direction, trade.offset, trade.price, trade.volume
         ))
-        #由于委托回报和成交之间还是有差异，所以我们在成交回报中确认 是否删除
+        #由于委托回报和成交之间还是有差异，所以在成交回报中确认 是否删除
         self.delete_gridline_records(self.find_gridline(order_id=trade.orderID))
+        # 平仓时，只有当这个网格线平完后被删除了，即执行了delete_gridline_records操作后，才能以这个平仓价格作为当前网格线更新参数
+        self.update_params(self.orders_info["direction"], self.last_grid)
 
 
     def write_log(self, msg: str, std: int=1):
@@ -228,6 +228,10 @@ class GT_v001(CtaTemplate):
         elif (direction == DIRECTION_LONG) & (offset == OFFSET_CLOSE):
             orderType = CTAORDER_COVER              # 买平
 
+        self.write_log("\n【预发委托单】合约: {}, 买卖: {}, 开平: {}, 价格: {}, 数量: {}".format(
+            self.vtSymbol, "做空" if direction == DIRECTION_SHORT else "做多",
+            "开仓" if offset==OFFSET_OPEN else "平仓", price, volume
+        ))
         # 确定网格线
         gridline = self.find_gridline(price=self.next_grid if offset == OFFSET_OPEN else self.current_grid)
 
@@ -247,6 +251,8 @@ class GT_v001(CtaTemplate):
             self.update_gridline_records(gridline=self.next_grid, order_id=order_id, open_qty=0, close_qty=None)
         elif offset == OFFSET_CLOSE:
             self.update_gridline_records(gridline=self.current_grid, order_id=order_id, open_qty=None, close_qty=0)
+
+        self.orders_info[order_id] = {"direction": direction, "offset": offset, "status": "未知", "order_volume": 0}
 
     def check_before_send(self, gridline: int, offset: int) -> bool:
         """发委托前检查"""
@@ -292,6 +298,8 @@ class GT_v001(CtaTemplate):
         condition_1 = self.gridline_records[gridline]["open_qty"] == self.gridline_records[gridline]["close_qty"]
         condition_2 = True
         for order_id in self.gridline_records[gridline]["order_id"]:
+            if order_id < 0:
+                continue
             if not self.orders_info[order_id]["status"] in ["全部成交", "已撤销"]:
                 condition_2 = False
         
@@ -299,6 +307,7 @@ class GT_v001(CtaTemplate):
             # 平仓完成，则从records中删除该网格线
             self.write_log(f"【平仓完成】删除该开仓网格 {gridline}, 相关信息未: {self.gridline_records[gridline]}")
             del self.gridline_records[gridline]
+            self.save_records(self.jFilePath)
 
     def find_gridline(self, price: Optional[int]=None, order_id: Optional[int]=None) -> int:
         """确定网格线
@@ -320,7 +329,7 @@ class GT_v001(CtaTemplate):
 
     def update_params(self, direction: int, price: int) -> None:
         """更新参数，只能当委托有成交才更新
-        self.last_grid 是平仓价格的判断标准，如果 self.last_grid 和 self.current_grid 相差了太大间距，可以后期设置哥定时器去补上这些差的网格
+        TODO：self.last_grid 是平仓价格的判断标准，如果 self.last_grid 和 self.current_grid 相差了太大间距，可以后期设置个定时器去补上这些差的网格
         """
         # 更新参数
         self.current_grid = price
@@ -328,8 +337,8 @@ class GT_v001(CtaTemplate):
         sorted_gridlines = sorted(self.gridline_records.keys())
         if len(sorted_gridlines) >= 2:
             self.last_grid = sorted_gridlines[-2] if direction==DIRECTION_SHORT else sorted_gridlines[1]
-        else:
-            self.last_grid = (self.current_grid - self.grid_interval) if direction==DIRECTION_SHORT else (self.current_grid + self.grid_interval)
+        else:       # 特殊情况：当存储的已开仓网格只有1个时，相当于平完了，则要开始换方向了
+            self.last_grid = 1 if direction==DIRECTION_SHORT else 9999
         self.write_log(f"\n【更新参数】上个网格: {self.last_grid}，当前网格: {self.current_grid}, 下个网格: {self.next_grid}")
 
     def cancel_before_send(self, offset: int) -> int:
@@ -338,12 +347,13 @@ class GT_v001(CtaTemplate):
             if offset == OFFSET_OPEN:
                 if (order_info["offset"] == OFFSET_CLOSE) and (order_info["status"] in ["未成交", "部分成交"]):
                     self.cancelOrder(order_id)
+                    self.write_log(f"【撤销委托】撤单id: {order_id}")
             elif offset == OFFSET_CLOSE:
                 if (order_info["offset"] == OFFSET_OPEN) and (order_info["status"] in ["未成交", "部分成交"]):
                     self.cancelOrder(order_id)
+                    self.write_log(f"【撤销委托】撤单id: {order_id}")
             else:
                 raise ValueError(f"不正确的 offset: {offset}")
-            self.write_log(f"【撤销委托】撤单id: {order_id}")
 
     def save_records(self, filepath: str):
         """保存记录信息"""
