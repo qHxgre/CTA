@@ -165,7 +165,7 @@ class GT_v001(CtaTemplate):
             if self.gridline_records[gridline]["open_qty"] == 0:
                 self.write_log(f"【撤销委托】撤单时，若该网格线 {gridline} 的开仓数量为0，则从记录信息中删除: {self.gridline_records[gridline]}")
                 del self.gridline_records[gridline]
-                self.save_records(self.jFilePath)
+                self.save_records(self.gridline_records.copy(), self.jFilePath)
 
     def onTrade(self, trade, log=False):
         """成交回报"""
@@ -321,7 +321,7 @@ class GT_v001(CtaTemplate):
             self.gridline_records[gridline]["close_qty"] = close_qty
 
         self.write_log(f"\n【更新 gridline】{self.gridline_records}")
-        self.save_records(self.jFilePath)
+        self.save_records(self.gridline_records.copy(), self.jFilePath)
 
     def delete_gridline_records(self, gridline: int):
         """平仓完成后删除相关网格信息，怎么判断平仓完成：
@@ -338,9 +338,9 @@ class GT_v001(CtaTemplate):
         
         if condition_1 and condition_2:
             # 平仓完成，则从records中删除该网格线
-            self.write_log(f"【平仓完成】删除该开仓网格 {gridline}, 相关信息未: {self.gridline_records[gridline]}")
+            self.write_log(f"【平仓完成】删除该开仓网格 {gridline}, 相关信息: {self.gridline_records[gridline]}")
             del self.gridline_records[gridline]
-            self.save_records(self.jFilePath)
+            self.save_records(self.gridline_records.copy(), self.jFilePath)
 
     def find_gridline(self, price: Optional[int]=None, order_id: Optional[int]=None) -> int:
         """确定网格线
@@ -371,6 +371,8 @@ class GT_v001(CtaTemplate):
             self.short_last_grid = None
             if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2大的网格
                 self.short_last_grid = sorted_gridlines[-2]
+                if self.short_last_grid < self.base_grid:       # 平仓网格不能超过基准价格
+                    self.short_last_grid = None
         elif direction == DIRECTION_LONG:
             self.long_curr_grid = price
             self.long_next_grid = self.long_curr_grid - self.grid_interval
@@ -378,6 +380,8 @@ class GT_v001(CtaTemplate):
             self.long_last_grid = None
             if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2小的网格
                 self.long_last_grid = sorted_gridlines[1]
+                if self.long_last_grid > self.base_grid:       # 平仓网格不能超过基准价格
+                    self.long_last_grid = None
         self.write_log(f"\n【更新参数】{self.print_grids()}")
 
     def cancel_before_send(self, offset: int) -> int:
@@ -394,13 +398,15 @@ class GT_v001(CtaTemplate):
             else:
                 raise ValueError(f"不正确的 offset: {offset}")
 
-    def save_records(self, filepath: str):
+    def save_records(self, gridline_records: dict, filepath: str):
         """保存记录信息"""
         records = {}
-        for gridline, gridinfo in self.gridline_records.items():
+        for gridline, gridinfo in gridline_records.items():
             if gridinfo["open_qty"] == 0:
                 continue
             gridinfo["open_qty"] = gridinfo["open_qty"] - gridinfo["close_qty"]
+            if gridinfo["open_qty"] == 0:
+                continue
             gridinfo["close_qty"] = 0
             records[gridline] = gridinfo
         with open(filepath, 'w') as jfile:
