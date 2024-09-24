@@ -298,7 +298,7 @@ class GT_v001(CtaTemplate):
                 if order_id < 0:        # 如果是隔夜订单，则跳过不检查
                     continue
                 if (self.orders_info[order_id]["offset"] == OFFSET_CLOSE) and (self.orders_info[order_id]["status"] in ["未知", "未成交", "部分成交", "部分撤单还在队列"]):
-                    self.write_log(f"【拒绝发单】该网格线 {gridline} 已有平仓挂单 {order_id}：{self.gridline_records[gridline]}, 订单信息如下：{self.orders_info[order_id]}")
+                    self.write_log(f"【拒绝发单】该网格线 {gridline} 已有平仓挂单 {order_id}：{self.gridline_records[gridline]}, 订单信息如下：{self.orders_info[order_id]}", std=0)
                     return False
         return True
 
@@ -316,9 +316,11 @@ class GT_v001(CtaTemplate):
             self.gridline_records[gridline]["order_id"].append(order_id)
 
         if open_qty is not None:        # 更新开仓单数据
+            # 开仓就算部分成交，后续我们也不补仓了，所以这里不用处理
             self.gridline_records[gridline]["open_qty"] = open_qty
         elif close_qty is not None:     # 更新平仓单数据
-            self.gridline_records[gridline]["close_qty"] = close_qty
+            # 平仓可能存在部分成交后撤单，然后再发剩余数量的平仓单的情况，所以这里要在原有的 close_qty 上进行相加
+            self.gridline_records[gridline]["close_qty"] += close_qty
 
         self.write_log(f"\n【更新 gridline】{self.gridline_records}")
         self.save_records(self.gridline_records.copy(), self.jFilePath)
@@ -333,7 +335,7 @@ class GT_v001(CtaTemplate):
         for order_id in self.gridline_records[gridline]["order_id"]:
             if order_id < 0:
                 continue
-            if not self.orders_info[order_id]["status"] in ["全部成交", "已撤销"]:
+            if self.orders_info[order_id]["status"] not in ["全部成交", "已撤销"]:
                 condition_2 = False
         
         if condition_1 and condition_2:
