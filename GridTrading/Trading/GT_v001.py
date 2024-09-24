@@ -46,12 +46,12 @@ class GT_v001(CtaTemplate):
 
         # 变量映射表: 可实时监控变量
         self.varMap = {
-            'short_last_grid': '【做空】上个网格',
-            'short_curr_grid': '【做空】当前网格',
-            'short_next_grid': '【做空】下个网格',
-            'long_last_grid': '【做多】上个网格',
-            'long_curr_grid': '【做多】当前网格',
-            'long_next_grid': '【做多】下个网格',
+            'short_last_grid': '做空-上个网格',
+            'short_curr_grid': '做空-当前网格',
+            'short_next_grid': '做空-下个网格',
+            'long_last_grid': '做多-上个网格',
+            'long_curr_grid': '做多-当前网格',
+            'long_next_grid': '做多-下个网格',
         }
 
         self.exchange = ''
@@ -107,14 +107,14 @@ class GT_v001(CtaTemplate):
             return
 
         # 确定网格参数
+        if tick.askPrice1 > self.base_grid:
+            direction = DIRECTION_SHORT
+        elif tick.bidPrice1 < self.base_grid:
+            direction = DIRECTION_LONG
+        else:
+            self.write_log(f"无法确定交易方向，暂不交易。base_grid: {self.base_grid}, 卖一价: {tick.ask_price1}, 买一价: {tick.bid_price1}")
+            return
         if self.need_initialize_grids(direction):
-            if tick.askPrice1 > self.base_grid:
-                direction = DIRECTION_SHORT
-            elif tick.bidPrice1 < self.base_grid:
-                direction = DIRECTION_LONG
-            else:
-                self.write_log(f"无法确定交易方向，暂不交易。base_grid: {self.base_grid}, 卖一价: {tick.ask_price1}, 买一价: {tick.bid_price1}")
-                return
             self.update_grid_params(direction, self.base_grid)
             return
 
@@ -123,14 +123,14 @@ class GT_v001(CtaTemplate):
             if book_price >= self.short_next_grid - self.trigger_shift:        # 开仓
                 self.send_order(DIRECTION_SHORT, OFFSET_OPEN, self.short_next_grid, self.order_volume)
             if (self.short_last_grid is not None) and (book_price <= self.short_last_grid + self.trigger_shift):       # 平仓
-                order_volume = self.gridline_records[self.short_last_grid]["open_qty"] - self.gridline_records[self.short_last_grid]["close_qty"]
+                order_volume = self.gridline_records[self.short_curr_grid]["open_qty"] - self.gridline_records[self.short_curr_grid]["close_qty"]
                 self.send_order(DIRECTION_LONG, OFFSET_CLOSE, self.short_last_grid, order_volume)
         elif tick.bidPrice1 < self.base_grid:       # 做多方向
             book_price = tick.bidPrice1           # 盘口价格
             if book_price <= self.long_next_grid + self.trigger_shift:       # 开仓
                 self.send_order(DIRECTION_LONG, OFFSET_OPEN, self.long_next_grid, self.order_volume)
             if (self.long_last_grid is not None) and (book_price >= self.long_last_grid - self.trigger_shift):       # 平仓
-                order_volume = self.gridline_records[self.long_last_grid]["open_qty"] - self.gridline_records[self.long_last_grid]["close_qty"]
+                order_volume = self.gridline_records[self.long_curr_grid]["open_qty"] - self.gridline_records[self.long_curr_grid]["close_qty"]
                 self.send_order(DIRECTION_SHORT, OFFSET_CLOSE, self.long_last_grid, order_volume)
         else:
             return      # 当前价格不在可开仓范围内，不交易
@@ -149,16 +149,15 @@ class GT_v001(CtaTemplate):
             "order_volume": order.totalVolume, "traded_volume": order.tradedVolume,
         }
     
-        # 根据委托汇报信息更新记录
+        # 根据委托汇报信息更新记录，NOTICE: 
+        # 1. 开仓可以在 onOrder 中进行，因为开仓只需要更新信息，没有后续操作
+        # 2. 平仓不能在 onOrder 里面更新信息，因为委托回报和真实成交中间还是会有延迟，可能会出现：onOrder -> onTick -> onTrade，所以平仓统一在 onTrade 里面进行，并更新各类信息和参数
+
         if order.offset == "开仓":
             gridline = self.find_gridline(price=order.price)
             self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=order.tradedVolume, close_qty=None)
             if order.tradedVolume != 0:     # 开仓时，只要当这个网格线有一手成交，就可以以这个开仓价格作为当前网格线更新参数
                 self.update_grid_params(DIRECTION_SHORT if order.direction == "卖" else DIRECTION_LONG, order.price)
-        elif order.offset in ["平今", "平仓", "平昨"]:
-            gridline = self.find_gridline(order_id=order.orderID)
-            self.update_gridline_records(gridline=gridline, order_id=order.orderID, open_qty=None, close_qty=order.tradedVolume)
-            # 平仓时，只有当这个网格线平完后被删除了，才能以这个平仓价格作为当前网格线更新参数，所以委托回报这里不更新参数，等到成交回报时再更新参数
 
         # 撤单时，如果该网格线的开仓数量为0，则直接删除该网格线
         if order.status == "已撤销":
@@ -173,12 +172,17 @@ class GT_v001(CtaTemplate):
         self.write_log("\n【成交回报】{} | 时间: {} | 成交编号: {} | 委托编号: {} | 方向: {} | 开平: {} | 价格: {} | 数量: {}".format(
             trade.symbol, trade.tradeTime, trade.tradeID, trade.orderID, trade.direction, trade.offset, trade.price, trade.volume
         ))
-        #由于委托回报和成交之间还是有差异，所以在成交回报中确认 是否删除
-        self.delete_gridline_records(self.find_gridline(order_id=trade.orderID))
-        # 平仓时，只有当这个网格线平完后被删除了，即执行了delete_gridline_records操作后，才能以这个平仓价格作为当前网格线更新参数
+
         if trade.offset in ["平今", "平仓", "平昨"]:
+            # STEP 1: 为平仓单找到其网格线
+            gridline = self.find_gridline(order_id=trade.orderID)
+            # STEP 2: 更新 gridline_records 中对应网格线的平仓数据
+            self.update_gridline_records(gridline=gridline, order_id=trade.orderID, open_qty=None, close_qty=self.orders_info[trade.orderID]["traded_volume"])
+            # STEP 3: 判断是否删除 gridline_records 中对应的网格线
+            self.delete_gridline_records(gridline)
+            # STEP 4: 删除之后，更新网格参数
             self.update_grid_params(
-                direction=DIRECTION_LONG if trade.direction == "卖" else DIRECTION_SHORT,
+                direction=DIRECTION_LONG if trade.direction == "空" else DIRECTION_SHORT,
                 price=self.short_last_grid if self.short_last_grid is not None else self.long_last_grid
             )
 
@@ -226,7 +230,7 @@ class GT_v001(CtaTemplate):
         if direction == DIRECTION_SHORT:
             return True if (self.short_curr_grid is None) and (self.short_curr_grid is None) and (self.short_curr_grid is None) else False
         elif direction == DIRECTION_LONG:
-            return True if (self.short_curr_grid is None) and (self.short_curr_grid is None) and (self.short_curr_grid is None) else False
+            return True if (self.long_curr_grid is None) and (self.long_curr_grid is None) and (self.long_curr_grid is None) else False
         else:
             raise ValueError("【ERROR】错误的方向：", direction)
 
@@ -252,15 +256,15 @@ class GT_v001(CtaTemplate):
             next_grid, curr_grid = self.long_next_grid, self.long_curr_grid
         elif (direction == DIRECTION_SHORT) & (offset == OFFSET_CLOSE):
             orderType = CTAORDER_SELL               # 卖平
-            next_grid, curr_grid = self.short_next_grid, self.short_curr_grid
+            next_grid, curr_grid = self.long_next_grid, self.long_curr_grid
         elif (direction == DIRECTION_LONG) & (offset == OFFSET_CLOSE):
             orderType = CTAORDER_COVER              # 买平
-            next_grid, curr_grid = self.long_next_grid, self.long_curr_grid
+            next_grid, curr_grid = self.short_next_grid, self.short_curr_grid
 
         self.write_log("\n【预发委托单】合约: {}, 买卖: {}, 开平: {}, 价格: {}, 数量: {}".format(
             self.vtSymbol, "做空" if direction == DIRECTION_SHORT else "做多",
             "开仓" if offset==OFFSET_OPEN else "平仓", price, volume
-        ))
+        ), std=0)
         # 确定网格线
         gridline = self.find_gridline(price=next_grid if offset == OFFSET_OPEN else curr_grid)
         if self.check_before_send(gridline, offset) is False:
