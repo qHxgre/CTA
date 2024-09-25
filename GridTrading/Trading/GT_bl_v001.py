@@ -446,7 +446,7 @@ class GT_v001(CtaTemplate):
         # 交易时间检查
         if isinstance(time_period, dict):
             for _, (start, end) in time_period.items():
-                self.write_log(f"{start} - {curtime} - {end}")
+                self.write_log(f"{start} - {curtime} - {end}", std=0)
                 if start <= curtime <= end:
                     return True
             return False
