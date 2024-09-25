@@ -103,8 +103,9 @@ class GT_v001(CtaTemplate):
         super().onTick(tick)
         self.putEvent()     # 更新时间，推送状态
         # 非交易时间直接返回
-        if not self.time_check(tick.time, 'trading'):
-            self.write_log(f'{tick.time} 为非交易时间！')
+        curr_time = datetime.now().strftime("%H:%M:%S")
+        if not self.time_check(curr_time, 'trading'):
+            self.write_log(f'{curr_time} 为非交易时间！')
             return
 
         # 确定网格参数
@@ -441,28 +442,17 @@ class GT_v001(CtaTemplate):
             "launch": ["19:00:00", "20:55:00"],         # 程序启动时间
         }
 
-        try:
-            curtime = datetime.strptime(curtime, "%H:%M:%S.%f").strftime("%H:%M:%S")
-            temp_time = datetime.strptime(curtime, "%H:%M:%S.%f").time()
-            curtime = datetime_time(temp_time.hour, temp_time.minute, temp_time.second)
-        except ValueError:
-            temp_time = datetime.strptime(curtime, "%H:%M:%S").time()
-            curtime = datetime_time(temp_time.hour, temp_time.minute, temp_time.second)
-
         time_period = self.timer[period]
         # 交易时间检查
         if isinstance(time_period, dict):
-            for _, (s, e) in time_period.items():
-                start = datetime.strptime(s, "%H:%M:%S").time()
-                end = datetime.strptime(e, "%H:%M:%S").time()
-                # self.write_log(f"{start} - {curtime} - {end}")
+            for _, (start, end) in time_period.items():
+                self.write_log(f"{start} - {curtime} - {end}")
                 if start <= curtime <= end:
                     return True
             return False
         # 其他时间检查
         elif isinstance(time_period, list):
-            start = datetime.strptime(time_period[0], "%H:%M:%S").time()
-            end = datetime.strptime(time_period[1], "%H:%M:%S").time()
+            start, end = time_period[0], time_period[1]
             return True if start <= curtime <= end else False
         else:
             raise ValueError("无法识别该时间段:", time_period)
