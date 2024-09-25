@@ -4,6 +4,7 @@ from ctaTemplate import *
 import os
 import json
 import math
+import copy
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -165,7 +166,7 @@ class GT_v001(CtaTemplate):
             if self.gridline_records[gridline]["open_qty"] == 0:
                 self.write_log(f"【撤销委托】撤单时，若该网格线 {gridline} 的开仓数量为0，则从记录信息中删除: {self.gridline_records[gridline]}")
                 del self.gridline_records[gridline]
-                self.save_records(self.gridline_records.copy(), self.jFilePath)
+                self.save_records(self.gridline_records, self.jFilePath)
 
     def onTrade(self, trade, log=False):
         """成交回报"""
@@ -179,12 +180,12 @@ class GT_v001(CtaTemplate):
             # STEP 2: 更新 gridline_records 中对应网格线的平仓数据
             self.update_gridline_records(gridline=gridline, order_id=trade.orderID, open_qty=None, close_qty=self.orders_info[trade.orderID]["traded_volume"])
             # STEP 3: 判断是否删除 gridline_records 中对应的网格线
-            self.delete_gridline_records(gridline)
-            # STEP 4: 删除之后，更新网格参数
-            self.update_grid_params(
-                direction=DIRECTION_LONG if trade.direction == "空" else DIRECTION_SHORT,
-                price=self.short_last_grid if self.short_last_grid is not None else self.long_last_grid
-            )
+            if self.delete_gridline_records(gridline):
+                # STEP 4: 如果平仓删除了网格之后，更新网格参数
+                self.update_grid_params(
+                    direction=DIRECTION_LONG if trade.direction == "空" else DIRECTION_SHORT,
+                    price=self.short_last_grid if self.short_last_grid is not None else self.long_last_grid
+                )
 
     def write_log(self, msg: str, std: int=1):
         """打印日志"""
@@ -323,12 +324,14 @@ class GT_v001(CtaTemplate):
             self.gridline_records[gridline]["close_qty"] += close_qty
 
         self.write_log(f"\n【更新 gridline】{self.gridline_records}")
-        self.save_records(self.gridline_records.copy(), self.jFilePath)
+        self.save_records(self.gridline_records, self.jFilePath)
 
-    def delete_gridline_records(self, gridline: int):
+    def delete_gridline_records(self, gridline: int) -> bool:
         """平仓完成后删除相关网格信息，怎么判断平仓完成：
         1. 在 gridline_records 中，open_qty == close_qty
         2. 在 orders_info 中，相关订单处于完成或撤单状态
+
+        返回bool变量，若平仓时删除了某个网格，则更新参数，否则不更新
         """
         condition_1 = self.gridline_records[gridline]["open_qty"] == self.gridline_records[gridline]["close_qty"]
         condition_2 = True
@@ -342,7 +345,10 @@ class GT_v001(CtaTemplate):
             # 平仓完成，则从records中删除该网格线
             self.write_log(f"【平仓完成】删除该开仓网格 {gridline}, 相关信息: {self.gridline_records[gridline]}")
             del self.gridline_records[gridline]
-            self.save_records(self.gridline_records.copy(), self.jFilePath)
+            self.save_records(self.gridline_records, self.jFilePath)
+            return True
+        else:
+            return False
 
     def find_gridline(self, price: Optional[int]=None, order_id: Optional[int]=None) -> int:
         """确定网格线
@@ -375,6 +381,8 @@ class GT_v001(CtaTemplate):
                 self.short_last_grid = sorted_gridlines[-2]
                 if self.short_last_grid < self.base_grid:       # 平仓网格不能超过基准价格
                     self.short_last_grid = None
+            if (self.short_last_grid >= self.short_curr_grid) or (self.long_curr_grid <= self.long_next_grid):
+                self.write_log(f"【ERROR】做空网格参数错误：{self.print_grids()}")
         elif direction == DIRECTION_LONG:
             self.long_curr_grid = price
             self.long_next_grid = self.long_curr_grid - self.grid_interval
@@ -384,6 +392,8 @@ class GT_v001(CtaTemplate):
                 self.long_last_grid = sorted_gridlines[1]
                 if self.long_last_grid > self.base_grid:       # 平仓网格不能超过基准价格
                     self.long_last_grid = None
+            if (self.long_last_grid <= self.long_curr_grid) or (self.long_curr_grid >= self.long_next_grid):
+                self.write_log(f"【ERROR】做多网格参数错误：{self.print_grids()}")
         self.write_log(f"\n【更新参数】{self.print_grids()}")
 
     def cancel_before_send(self, offset: int) -> int:
@@ -402,17 +412,20 @@ class GT_v001(CtaTemplate):
 
     def save_records(self, gridline_records: dict, filepath: str):
         """保存记录信息"""
-        records = {}
-        for gridline, gridinfo in gridline_records.items():
+        # 在 Python 中，当使用 copy() 方法复制一个字典时，实际上只复制了字典的第一层（即字典的引用），而没有进行深拷贝，所以用 deepcopy
+        records = copy.deepcopy(self.gridline_records)
+        new_records = {}
+        for gridline, gridinfo in records.items():
             if gridinfo["open_qty"] == 0:
                 continue
             gridinfo["open_qty"] = gridinfo["open_qty"] - gridinfo["close_qty"]
             if gridinfo["open_qty"] == 0:
                 continue
             gridinfo["close_qty"] = 0
-            records[gridline] = gridinfo
+            new_records[gridline] = gridinfo
         with open(filepath, 'w') as jfile:
             json.dump(records, jfile, indent=4)
+
 
     def time_check(self, curtime: str, period: str) -> bool:
         """检查当前时间是否在特定的时间段内"""
