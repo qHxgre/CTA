@@ -381,8 +381,8 @@ class GT_v001(CtaTemplate):
                 self.short_last_grid = sorted_gridlines[-2]
                 if self.short_last_grid < self.base_grid:       # 平仓网格不能超过基准价格
                     self.short_last_grid = None
-            if (self.short_last_grid >= self.short_curr_grid) or (self.long_curr_grid <= self.long_next_grid):
-                self.write_log(f"【ERROR】做空网格参数错误：{self.print_grids()}")
+            if (self.short_last_grid >= self.short_curr_grid) or (self.short_curr_grid >= self.short_next_grid):
+                raise ValueError(f"【ERROR】做空网格参数错误：{self.print_grids()}")
         elif direction == DIRECTION_LONG:
             self.long_curr_grid = price
             self.long_next_grid = self.long_curr_grid - self.grid_interval
@@ -392,8 +392,8 @@ class GT_v001(CtaTemplate):
                 self.long_last_grid = sorted_gridlines[1]
                 if self.long_last_grid > self.base_grid:       # 平仓网格不能超过基准价格
                     self.long_last_grid = None
-            if (self.long_last_grid <= self.long_curr_grid) or (self.long_curr_grid >= self.long_next_grid):
-                self.write_log(f"【ERROR】做多网格参数错误：{self.print_grids()}")
+            if (self.long_last_grid <= self.long_curr_grid) or (self.long_curr_grid <= self.long_next_grid):
+                raise ValueError(f"【ERROR】做多网格参数错误：{self.print_grids()}")
         self.write_log(f"\n【更新参数】{self.print_grids()}")
 
     def cancel_before_send(self, offset: int) -> int:
