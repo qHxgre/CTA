@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 from datetime import time as datetime_time
 from typing import Optional, Tuple
+from itertools import islice
 
 
 DIRECTION_SHORT = -1
@@ -179,7 +180,7 @@ class GT_qc_v001(CtaTemplate):
             # STEP 1: 为平仓单找到其网格线
             gridline = self.find_gridline(order_id=trade.orderID)
             # STEP 2: 更新 gridline_records 中对应网格线的平仓数据
-            self.update_gridline_records(gridline=gridline, order_id=trade.orderID, open_qty=None, close_qty=self.orders_info[trade.orderID]["traded_volume"])
+            self.update_gridline_records(gridline=gridline, order_id=trade.orderID, open_qty=None, close_qty=trade.volume)
             # STEP 3: 判断是否删除 gridline_records 中对应的网格线
             if self.delete_gridline_records(gridline):
                 # STEP 4: 如果平仓删除了网格之后，更新网格参数
@@ -324,7 +325,13 @@ class GT_qc_v001(CtaTemplate):
             # 平仓可能存在部分成交后撤单，然后再发剩余数量的平仓单的情况，所以这里要在原有的 close_qty 上进行相加
             self.gridline_records[gridline]["close_qty"] += close_qty
 
-        self.write_log(f"\n【更新 gridline】{self.gridline_records}")
+        # 打印：只打印前五个网格信息
+        sorted_records = dict(sorted(self.gridline_records.items()))
+        print_records = {}
+        for k, v in islice(sorted_records.items(), 5):
+            print_records[k] = v
+        self.write_log(f"\n【更新 gridline】{print_records}")
+
         self.save_records(self.jFilePath)
 
     def delete_gridline_records(self, gridline: int) -> bool:
@@ -376,6 +383,8 @@ class GT_qc_v001(CtaTemplate):
         if direction == DIRECTION_SHORT:
             self.short_curr_grid = price
             self.short_next_grid = self.short_curr_grid + self.grid_interval
+            # 【qc定制化】跳过整数点
+            self.short_next_grid = self.qc_skip_integer(direction, self.short_next_grid)
             # 初始设置为 None, 当 gridlines 中只剩1个网格或没有网格时，则没有上一个平仓线
             self.short_last_grid = None
             if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2大的网格
@@ -387,6 +396,8 @@ class GT_qc_v001(CtaTemplate):
         elif direction == DIRECTION_LONG:
             self.long_curr_grid = price
             self.long_next_grid = self.long_curr_grid - self.grid_interval
+            # 【qc定制化】跳过整数点
+            self.long_next_grid = self.qc_skip_integer(direction, self.long_next_grid)
             # 初始设置为 None, 当 gridlines 中只剩1个网格或没有网格时，则没有上一个平仓线
             self.long_last_grid = None
             if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2小的网格
@@ -417,17 +428,16 @@ class GT_qc_v001(CtaTemplate):
         """保存记录信息"""
         # 在 Python 中，当使用 copy() 方法复制一个字典时，实际上只复制了字典的第一层（即字典的引用），而没有进行深拷贝，所以用 deepcopy
         records = copy.deepcopy(self.gridline_records)
+        records = dict(sorted(records.items()))
         new_records = {}
         for gridline, gridinfo in records.items():
-            if gridinfo["open_qty"] == 0:
-                continue
             gridinfo["open_qty"] = gridinfo["open_qty"] - gridinfo["close_qty"]
+            gridinfo["close_qty"] = 0
             if gridinfo["open_qty"] == 0:
                 continue
-            gridinfo["close_qty"] = 0
             new_records[gridline] = gridinfo
         with open(filepath, 'w') as jfile:
-            json.dump(records, jfile, indent=4)
+            json.dump(new_records, jfile, indent=4)
 
     def time_check(self, curtime: str, period: str) -> bool:
         """检查当前时间是否在特定的时间段内"""
@@ -436,7 +446,7 @@ class GT_qc_v001(CtaTemplate):
                 "amfh": ["09:00:00", "10:15:00"],       # 早盘上半场交易时间
                 "amsh": ["10:30:00", "11:30:00"],       # 早盘下半场交易时间
                 "pm": ["13:30:00", "15:00:00"],         # 下午交易时间
-                "night": ["21:00:00", "23:00:00"],      # 夜盘时间
+                "night": ["21:00:05", "23:00:00"],      # 夜盘时间: 无限易时间和当地时间可能有差异
             },
             "auction": ["20:55:00", "20:58:55"],        # 集合竞价时间
             "closing": ["14:59:55", "15:00:00"],        # 尾盘时间
@@ -457,3 +467,13 @@ class GT_qc_v001(CtaTemplate):
             return True if start <= curtime <= end else False
         else:
             raise ValueError("无法识别该时间段:", time_period)
+
+
+    def qc_skip_integer(self, direction: int, price: int) -> int:
+        """【qc定制化】如果下个网格遇到了整数点，则换一个临近的网格线"""
+        if direction == DIRECTION_SHORT:
+            return (price - 1) if (price / 10).is_integer() else price
+        elif direction == DIRECTION_LONG:
+            return price + 1 if (price / 10).is_integer() else price
+        else:
+            raise ValueError(f"【ERROR】跳过整数点时，direction 错误: {direction}")

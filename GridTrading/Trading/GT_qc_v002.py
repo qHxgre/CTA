@@ -27,9 +27,9 @@ STATUS_UNKNOWN = -1
 
 
 
-class GT_bl_v001(CtaTemplate):
+class GT_qc_v002(CtaTemplate):
     """单品种期货网格交易"""
-    className = 'GT_bl_v001'
+    className = 'GT_qc_v002'
     author = 'hxgre'
     name = 'BigGT'                # 策略实例名称
 
@@ -92,7 +92,9 @@ class GT_bl_v001(CtaTemplate):
         """
         self.orders_info = {}
         self.jFilePath = 'SRdata.json'
-
+        # 【qc定制】底仓增加的orders_info
+        self.qc_orders_info = {}
+        self.ask_price, self.bid_price = 0, 0
         # 设置策略的参数
         self.onUpdate(setting)
 
@@ -110,6 +112,7 @@ class GT_bl_v001(CtaTemplate):
         #     return
 
         # 确定网格参数
+        self.ask_price, self.bid_price = tick.askPrice1, tick.bidPrice1
         if tick.askPrice1 > self.base_grid:
             direction = DIRECTION_SHORT
         elif tick.bidPrice1 < self.base_grid:
@@ -145,6 +148,17 @@ class GT_bl_v001(CtaTemplate):
         self.write_log("\n【委托回报】{} | 时间: {} | 委托编号: {} | 方向: {} | 开平: {} | 状态: {} | 价格: {} | 下单数量: {} | 成交数量: {}".format(
             order.symbol, order.orderTime, order.orderID, order.direction, order.offset, order.status, order.price, order.totalVolume, order.tradedVolume
         ))
+        # 【qc定制】底仓增加的信息记录,只记录不做任何处理
+        if order.orderID in self.qc_orders_info.keys():
+            self.write_log(f"【qc委托回报】增加底仓，只记录不做任何处理: {self.qc_orders_info}")
+            self.orders_info[order.orderID] = {
+                "direction": DIRECTION_SHORT if order.direction=='空' else DIRECTION_LONG,
+                "offset": OFFSET_OPEN if order.offset=='开仓' else OFFSET_CLOSE,
+                "status": order.status, "price": order.price,
+                "order_volume": order.totalVolume, "traded_volume": order.tradedVolume,
+            }
+            return
+
         self.orders_info[order.orderID] = {
             "direction": DIRECTION_SHORT if order.direction=='空' else DIRECTION_LONG,
             "offset": OFFSET_OPEN if order.offset=='开仓' else OFFSET_CLOSE,
@@ -175,6 +189,9 @@ class GT_bl_v001(CtaTemplate):
         self.write_log("\n【成交回报】{} | 时间: {} | 成交编号: {} | 委托编号: {} | 方向: {} | 开平: {} | 价格: {} | 数量: {}".format(
             trade.symbol, trade.tradeTime, trade.tradeID, trade.orderID, trade.direction, trade.offset, trade.price, trade.volume
         ))
+        # 【qc定制】底仓增加的信息记录,只记录不做任何处理
+        if trade.orderID in self.qc_orders_info.keys():
+            return
 
         if trade.offset in ["平今", "平仓", "平昨"]:
             # STEP 1: 为平仓单找到其网格线
@@ -188,6 +205,8 @@ class GT_bl_v001(CtaTemplate):
                     direction=DIRECTION_LONG if trade.direction == "空" else DIRECTION_SHORT,
                     price=self.short_last_grid if self.short_last_grid is not None else self.long_last_grid
                 )
+                # 【qc定制】STEP 5: 平仓了一个网格后，检查当前持仓市值是否满足需求
+                self.qc_control_base(self.ask_price, self.bid_price)
 
     def write_log(self, msg: str, std: int=1):
         """打印日志"""
@@ -383,6 +402,8 @@ class GT_bl_v001(CtaTemplate):
         if direction == DIRECTION_SHORT:
             self.short_curr_grid = price
             self.short_next_grid = self.short_curr_grid + self.grid_interval
+            # 【qc定制化】跳过整数点
+            self.short_next_grid = self.qc_skip_integer(direction, self.short_next_grid)
             # 初始设置为 None, 当 gridlines 中只剩1个网格或没有网格时，则没有上一个平仓线
             self.short_last_grid = None
             if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2大的网格
@@ -394,6 +415,8 @@ class GT_bl_v001(CtaTemplate):
         elif direction == DIRECTION_LONG:
             self.long_curr_grid = price
             self.long_next_grid = self.long_curr_grid - self.grid_interval
+            # 【qc定制化】跳过整数点
+            self.long_next_grid = self.qc_skip_integer(direction, self.long_next_grid)
             # 初始设置为 None, 当 gridlines 中只剩1个网格或没有网格时，则没有上一个平仓线
             self.long_last_grid = None
             if gridlines_nums >= 2:       # 正常更新参数，则选择已有开仓网格中的第2小的网格
@@ -463,3 +486,42 @@ class GT_bl_v001(CtaTemplate):
             return True if start <= curtime <= end else False
         else:
             raise ValueError("无法识别该时间段:", time_period)
+
+
+    def qc_skip_integer(self, direction: int, price: int) -> int:
+        """【qc定制化】如果下个网格遇到了整数点，则换一个临近的网格线"""
+        if direction == DIRECTION_SHORT:
+            return (price - 1) if (price / 10).is_integer() else price
+        elif direction == DIRECTION_LONG:
+            return price + 1 if (price / 10).is_integer() else price
+        else:
+            raise ValueError(f"【ERROR】跳过整数点时，direction 错误: {direction}")
+
+    def qc_control_base(self, ask_price: int, bid_price: int):
+        """【qc定制化】控制底仓40%
+        1. 当持仓市值不足账户资金的40%时，立即在当前价格上增加 N 手
+        """
+        add_qty = 50                    # 加仓 N 手
+        limit_pct = 0.4                 # 持仓占比限制
+        direction = DIRECTION_LONG      # 加仓方向
+
+        account = self.get_investor_account(self.account_id)
+        available = account.available               # 账户可用资金
+        balance = account.balance                   # 账户总资产
+        balance = 4000000       # 假设账户持仓是400万
+        holding_pct = (1 - available / balance)     # 持仓占比
+
+        if holding_pct < limit_pct:         # 如果持仓占比小于阀值，则进行加仓操作
+            if direction == DIRECTION_SHORT:
+                orderType = CTAORDER_SHORT
+                price = bid_price
+            elif direction == DIRECTION_LONG:
+                orderType = CTAORDER_BUY
+                price = ask_price
+
+            order_id = self.sendOrder(
+                orderType=orderType, price=price, volume=add_qty, symbol=self.vtSymbol, exchange=self.exchange
+            )
+            self.qc_orders_info[order_id] = {"direction": direction, "offset": OFFSET_OPEN,"status": "未知",
+                                             "price": price, "order_volume": add_qty, "traded_volume": 0,}
+            self.write_log(f"【qc定制】增加底仓！持仓占比: {holding_pct}, 可用资金: {available}, 账户资金: {balance}, 委托方向: {direction}, 委托价格: {price}, 委托数量: {add_qty}")

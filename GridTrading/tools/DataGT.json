@@ -1,44 +1,9 @@
 {
-    "5923": {
-        "order_id": [
-            -1
-        ],
-        "open_qty": 1,
-        "close_qty": 0
-    },
-    "5927": {
-        "order_id": [
-            -1
-        ],
-        "open_qty": 12,
-        "close_qty": 0
-    },
-    "5931": {
-        "order_id": [
-            -1
-        ],
-        "open_qty": 12,
-        "close_qty": 0
-    },
-    "5935": {
-        "order_id": [
-            -1
-        ],
-        "open_qty": 12,
-        "close_qty": 0
-    },
-    "5939": {
-        "order_id": [
-            -1
-        ],
-        "open_qty": 12,
-        "close_qty": 0
-    },
     "5943": {
         "order_id": [
             -1
         ],
-        "open_qty": 12,
+        "open_qty": 11,
         "close_qty": 0
     },
     "5947": {
