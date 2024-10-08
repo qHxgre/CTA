@@ -78,7 +78,7 @@ class GT_qc_v002(CtaTemplate):
         self.gridline_records = {}
 
         """order_info
-        由于无限意无法获取历史委托单的信息，所以我们手动记录相关信息，示例如下：
+        由于无限易无法获取历史委托单的信息，所以我们手动记录相关信息，示例如下：
         order_info = {
             订单号: {
                 "direction": "方向",
@@ -106,10 +106,10 @@ class GT_qc_v002(CtaTemplate):
         super().onTick(tick)
         self.putEvent()     # 更新时间，推送状态
         # 非交易时间直接返回
-        # curr_time = datetime.now().strftime("%H:%M:%S")
-        # if not self.time_check(curr_time, 'trading'):
-        #     self.write_log(f'{curr_time} 为非交易时间！')
-        #     return
+        curr_time = datetime.now().strftime("%H:%M:%S")
+        if not self.time_check(curr_time, 'trading'):
+            self.write_log(f'{curr_time} 为非交易时间！')
+            return
 
         # 确定网格参数
         self.ask_price, self.bid_price = tick.askPrice1, tick.bidPrice1
@@ -121,9 +121,10 @@ class GT_qc_v002(CtaTemplate):
             self.write_log(f"无法确定交易方向，暂不交易。base_grid: {self.base_grid}, 卖一价: {tick.ask_price1}, 买一价: {tick.bid_price1}")
             return
         if self.need_initialize_grids(direction):
+            print
             self.update_grid_params(direction, self.base_grid)
             return
-
+        
         if tick.askPrice1 > self.base_grid:         # 做空方向
             book_price = tick.askPrice1     # 盘口价格
             if book_price >= self.short_next_grid - self.trigger_shift:        # 开仓
@@ -311,17 +312,26 @@ class GT_qc_v002(CtaTemplate):
 
     def check_before_send(self, gridline: int, offset: int) -> bool:
         """发委托前检查"""
+        # 避免重复发开仓单：网格已开仓，则不用开仓
         if (offset==OFFSET_OPEN) & (gridline in self.gridline_records):
-            # 避免重复发开仓单：网格已开仓，则不用开仓
             return False
+        # 避免重复发平仓单：遍历gridline的order_id，如果有个平仓挂单则不允许发平仓单
         if offset==OFFSET_CLOSE:
-            # 避免重复发平仓单：遍历gridline的order_id，如果有个平仓挂单则不允许发平仓单
+            close_qty = 0
             for order_id in self.gridline_records[gridline]["order_id"]:
                 if order_id < 0:        # 如果是隔夜订单，则跳过不检查
                     continue
+                # 拒绝发单1：已挂了一个平仓单
                 if (self.orders_info[order_id]["offset"] == OFFSET_CLOSE) and (self.orders_info[order_id]["status"] in ["未知", "未成交", "部分成交", "部分撤单还在队列"]):
                     self.write_log(f"【拒绝发单】该网格线 {gridline} 已有平仓挂单 {order_id}：{self.gridline_records[gridline]}, 订单信息如下：{self.orders_info[order_id]}", std=0)
                     return False
+                # 拒绝发单2：累加平仓委托单的数量，如果等于开仓数量则拒绝再发平仓单。
+                # 这主要是因为OnTick 的调用可能穿插在onOrder, OnTrade 之间，可能出现：onOrder 中更新了平仓单的订单状态，但onTrade未触发还未更新gridline中的平仓数量，onTick触发再次发平仓单
+                if self.orders_info[order_id]["offset"] == OFFSET_CLOSE:
+                    close_qty += self.orders_info[order_id]["traded_volume"]
+                    if self.gridline_records[gridline]["open_qty"] <= close_qty:
+                        self.write_log(f"【拒绝发单】该网格线 {gridline} 平仓数量等于开仓数量，开仓数量：{self.gridline_records[gridline]['open_qty']}, 已平数量: {close_qty}", std=0)
+                        return False
         return True
 
     def update_gridline_records(self, gridline: int, order_id: int, open_qty: Optional[int], close_qty: Optional[int]) -> None:

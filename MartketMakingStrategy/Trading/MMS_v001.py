@@ -68,7 +68,6 @@ class MMS_v001(CtaTemplate):
         self.account_id = '18487205898'
         self.order_volume = 5       # 下单手数
         self.interval = 3           # 间隔
-        self.open_nums = 5          # 最大开仓次数
 
         """做市开仓的相关信息
         mm_records = {
@@ -76,7 +75,8 @@ class MMS_v001(CtaTemplate):
             DIRECTION_LONG: {价格: [订单号, 委托数量, 成交数量]},
         }
         """
-        self.mm_records = {DIRECTION_SHORT: {}, DIRECTION_LONG: {}}
+        self.market_records = {DIRECTION_SHORT: {}, DIRECTION_LONG: {}}
+        self.limited_opens = 5          # 最大开仓次数
 
         """订单信息：由于无限易无法查询每个订单的状态，所以用dict维护订单信息
         order_records = {订单号: [委托价格, 委托数量, 订单状态, 成交价格, 成交数量]}
@@ -94,10 +94,9 @@ class MMS_v001(CtaTemplate):
         super().onTick(tick)
         self.putEvent()     # 更新时间，推送状态
 
-        self.initAsk = min(self.mm_records[DIRECTION_SHORT]) if self.mm_records[DIRECTION_SHORT] else tick.askPrice1
-        self.initBid = min(self.mm_records[DIRECTION_LONG]) if self.mm_records[DIRECTION_LONG] else tick.bidPrice1
-
-        self.making_market(tick.askPrice1, tick.bidPrice1)
+        # 获取做空和做多方向的初始价格
+        init_ask, init_bid = min(self.mm_records[DIRECTION_SHORT]), max(self.mm_records[DIRECTION_LONG])
+        self.making_market(tick.askPrice1, tick.bidPrice1, init_ask, init_bid)
 
     def onOrder(self, order, log=False):
         """委托回报"""
@@ -151,13 +150,27 @@ class MMS_v001(CtaTemplate):
             self.cancel_order(order_id)
             self.write_log(f"【撤销委托】撤单id: {order_id}")
 
-    def making_market(self, ask_price: int, bid_price: int):
+    def making_market(self, ask_price: int, bid_price: int, init_ask: int, init_bid):
         """做市策略核心判断逻辑
-        当 askPrice1 上涨，则成交相应的挂单，并补上相应的挂单，保证5个买开单
-        当 askPrice1 下跌，则撤去相应的挂单，并重新挂单，保证5个买开单
+        当 askPrice1 上涨，则成交相应的挂单，并补上相应的挂单，保证5个卖开单
+        当 askPrice1 下跌，则撤去相应的挂单，并重新挂单，保证5个卖开单
         当 bidPrice1 上涨，则撤去相应的挂单，并重新挂单，保证5个买开单
         当 bidPrice1 下跌，则成交相应的挂单，并补上相应的挂单，保证5个买开单
         """
+        if ask_price != init_ask:      # 做空方向有变动
+            if ask_price > init_ask:
+                # ask_price 上涨，则说明成交了相应的挂单，补上挂单，保证5个卖开单
+                if len(self.market_records[DIRECTION_SHORT]) < self.limited_opens:
+                    price = ask_price
+                    
+            elif ask_price < init_ask:
+                # ask_price 下跌，则撤去多余的挂单，并重新挂单，保证5个卖开单
+                pass
+
+        if bid_price != init_bid:      # 做多方向有变动
+            pass
+
+
         price = ask_price
         if ask_price > self.initAsk:
             if len(self.mm_records[DIRECTION_SHORT]) < self.open_nums:
@@ -165,7 +178,6 @@ class MMS_v001(CtaTemplate):
                 for price in range(self.initAsk, ask_price+self.interval*self.open_nums, self.interval):
                     if price not in self.mm_records[DIRECTION_SHORT].keys():
                         self.send_order(direction=DIRECTION_SHORT, offset=OFFSET_OPEN, price=price, volume=self.order_volume)
-            
         elif bid_price < self.initAsk:
             pass
         else:
